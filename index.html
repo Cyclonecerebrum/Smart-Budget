@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Smart Budget — จัดการรายรับรายจ่าย</title>
+    <meta name="theme-color" content="#111827" />
+    <!-- Tailwind (CDN) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React + ReactDOM UMD -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Recharts UMD -->
+    <script crossorigin src="https://unpkg.com/recharts/umd/Recharts.min.js"></script>
+    <!-- Babel (ให้เบราว์เซอร์อ่าน JSX ได้) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>html,body{height:100%}</style>
+  </head>
+  <body class="bg-slate-50">
+    <div id="root"></div>
+
+    <script type="text/babel">
+      const {useEffect, useMemo, useState, useRef} = React;
+      const {
+        PieChart, Pie, Cell, Tooltip, Legend,
+        BarChart, Bar, XAxis, YAxis, CartesianGrid,
+        LineChart, Line, ResponsiveContainer
+      } = Recharts;
+
+      // ===== Utils =====
+      const STORAGE_KEY = "smart_budget_v1";
+      const fmtTHB = (n) => new Intl.NumberFormat("th-TH", { style: "currency", currency: "THB" }).format(Number(n||0));
+      const pad2 = (n) => String(n).padStart(2, "0");
+      const toMonthKey = (d) => `${d.getFullYear()}-${pad2(d.getMonth()+1)}`;
+      const daysInMonth = (year, month) => new Date(year, month, 0).getDate();
+      const today = new Date();
+      const CURRENT_MONTH_KEY = toMonthKey(today);
+
+      const defaultCategories = [
+        { id: "food", name: "อาหาร", color: "#34d399" },
+        { id: "housing", name: "ที่พัก/ผ่อนบ้าน", color: "#60a5fa" },
+        { id: "transport", name: "เดินทาง", color: "#f59e0b" },
+        { id: "utilities", name: "ค่าสาธารณูปโภค", color: "#a78bfa" },
+        { id: "health", name: "สุขภาพ", color: "#ef4444" },
+        { id: "education", name: "การศึกษา", color: "#10b981" },
+        { id: "entertainment", name: "บันเทิง", color: "#f472b6" },
+        { id: "debt", name: "หนี้/ผ่อน", color: "#fb923c" },
+        { id: "savings", name: "ออม/ลงทุน", color: "#22d3ee" },
+        { id: "other", name: "อื่น ๆ", color: "#9ca3af" },
+      ];
+
+      const seedData = () => {
+        const baseMonth = CURRENT_MONTH_KEY; const mk = (d) => `${baseMonth}-${pad2(d)}`;
+        return {
+          version: "1.2.1",
+          categories: defaultCategories,
+          settings: { includeCarryOver: true },
+          incomes: [
+            { id: crypto.randomUUID(), date: `${mk(1)}T09:00:00`, source: "เงินเดือน", amount: 45000 },
+            { id: crypto.randomUUID(), date: `${mk(3)}T18:00:00`, source: "ฟรีแลนซ์", amount: 5000 },
+          ],
+          expenses: [
+            { id: crypto.randomUUID(), date: `${mk(2)}T12:00:00`, categoryId: "food", amount: 250, note: "ข้าวเที่ยง" },
+            { id: crypto.randomUUID(), date: `${mk(3)}T08:30:00`, categoryId: "transport", amount: 80, note: "รถไฟฟ้า" },
+            { id: crypto.randomUUID(), date: `${mk(4)}T20:10:00`, categoryId: "entertainment", amount: 300, note: "หนัง" },
+            { id: crypto.randomUUID(), date: `${mk(5)}T09:00:00`, categoryId: "housing", amount: 12000, note: "ค่าเช่า" },
+            { id: crypto.randomUUID(), date: `${mk(6)}T10:00:00`, categoryId: "utilities", amount: 1500, note: "ค่าน้ำไฟ" },
+            { id: crypto.randomUUID(), date: `${mk(7)}T10:00:00`, categoryId: "savings", amount: 5000, note: "ออม" },
+            { id: crypto.randomUUID(), date: `${mk(8)}T13:20:00`, categoryId: "food", amount: 180, note: "ก๋วยเตี๋ยว" },
+          ],
+        };
+      };
+
+      const firstDayOfMonthISO = (monthKey) => `${monthKey}-01`;
+      const autoAdvanceSelectedMonth = (selected, prevSystem, newSystem) => selected === prevSystem ? newSystem : selected;
+
+      function App(){
+        const [state, setState] = useState(() => {
+          try { const saved = localStorage.getItem(STORAGE_KEY); if(saved) return JSON.parse(saved); } catch {}
+          return seedData();
+        });
+        const [selectedMonth, setSelectedMonth] = useState(() => CURRENT_MONTH_KEY);
+        const [dark, setDark] = useState(false);
+
+        const [systemMonth, setSystemMonth] = useState(() => toMonthKey(new Date()));
+        const systemMonthRef = useRef(systemMonth);
+        useEffect(() => {
+          const id = setInterval(() => {
+            const mk = toMonthKey(new Date());
+            if (mk !== systemMonthRef.current){
+              const prev = systemMonthRef.current;
+              systemMonthRef.current = mk;
+              setSystemMonth(mk);
+              setSelectedMonth(sel => autoAdvanceSelectedMonth(sel, prev, mk));
+            }
+          }, 60_000);
+          return () => clearInterval(id);
+        }, []);
+
+        const includeCarry = state.settings?.includeCarryOver ?? false;
+
+        useEffect(() => {
+          try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch(e){ console.error(e); }
+        }, [state]);
+
+        // Derived
+        const selectedYear = useMemo(() => Number(selectedMonth.slice(0,4)), [selectedMonth]);
+        const monthIncomes = useMemo(() => state.incomes.filter(i => i.date.slice(0,7)===selectedMonth), [state.incomes, selectedMonth]);
+        const monthExpenses = useMemo(() => state.expenses.filter(e => e.date.slice(0,7)===selectedMonth), [state.expenses, selectedMonth]);
+        const totalIncome  = useMemo(() => monthIncomes.reduce((s,i)=>s+Number(i.amount||0),0), [monthIncomes]);
+        const totalExpense = useMemo(() => monthExpenses.reduce((s,e)=>s+Number(e.amount||0),0), [monthExpenses]);
+
+        const cutoffISO = firstDayOfMonthISO(selectedMonth);
+        const carryPrev = useMemo(() => {
+          const incomeBefore = state.incomes.filter(i => i.date.slice(0,10) < cutoffISO).reduce((s,i)=>s+Number(i.amount||0),0);
+          const expenseBefore = state.expenses.filter(e => e.date.slice(0,10) < cutoffISO).reduce((s,e)=>s+Number(e.amount||0),0);
+          return incomeBefore - expenseBefore;
+        }, [state.incomes, state.expenses, cutoffISO]);
+
+        const capacity = includeCarry ? totalIncome + carryPrev : totalIncome;
+        const endingBalance = capacity - totalExpense;
+
+        const utilization = capacity>0 ? totalExpense/capacity : (totalExpense>0?1.01:0);
+        const status = (capacity<=0 && totalExpense>0) ? "วิกฤต"
+                      : (totalExpense>=capacity && capacity>0) ? "วิกฤต"
+                      : (utilization>0.8) ? "เสี่ยง" : "ปกติ";
+
+        const isCurrentMonth = selectedMonth === systemMonth;
+        const [yy, mm] = selectedMonth.split("-").map(Number);
+        const dim = daysInMonth(yy, mm);
+        const dayToday = isCurrentMonth ? new Date().getDate() : Math.min(dim, 15);
+        const dailyAvg = dayToday>0 ? totalExpense/dayToday : 0;
+        const projectedExpense = Math.max(totalExpense, dailyAvg*dim);
+        const projectedShort = projectedExpense - capacity;
+        const willShort = projectedExpense > capacity;
+
+        const categoryMap = useMemo(() => Object.fromEntries(state.categories.map(c => [c.id, c])), [state.categories]);
+        const pieData = useMemo(() => {
+          const sum={}; monthExpenses.forEach(e => sum[e.categoryId]=(sum[e.categoryId]||0)+Number(e.amount||0));
+          return Object.entries(sum).map(([categoryId,amount])=>({ name:categoryMap[categoryId]?.name||categoryId, value:amount, color:categoryMap[categoryId]?.color||"#94a3b8" }));
+        }, [monthExpenses, categoryMap]);
+
+        const yearData = useMemo(() => {
+          const arr=[]; for(let m=1;m<=12;m++){ const mk=`${selectedYear}-${pad2(m)}`;
+            const income = state.incomes.filter(x=>x.date.slice(0,7)===mk).reduce((s,x)=>s+Number(x.amount||0),0);
+            const expense= state.expenses.filter(x=>x.date.slice(0,7)===mk).reduce((s,x)=>s+Number(x.amount||0),0);
+            arr.push({month:mk, income, expense, balance: income-expense});
+          } return arr;
+        }, [state.incomes, state.expenses, selectedYear]);
+
+        // Forms
+        const [incomeForm, setIncomeForm] = useState({ date:`${selectedMonth}-${pad2(today.getDate())}`, source:"", amount:"" });
+        const [expenseForm, setExpenseForm] = useState({ date:`${selectedMonth}-${pad2(today.getDate())}`, categoryId: state.categories[0]?.id || "other", amount:"", note:"" });
+        useEffect(()=>{
+          const safeDay = pad2(Math.min(new Date().getDate(), daysInMonth(yy,mm)));
+          setIncomeForm(f=>({...f, date:`${selectedMonth}-${safeDay}`}));
+          setExpenseForm(f=>({...f, date:`${selectedMonth}-${safeDay}`}));
+        }, [selectedMonth]);
+
+        const addIncome = () => {
+          if(!incomeForm.amount) return;
+          setState(s => ({ ...s, incomes:[...s.incomes, { id:crypto.randomUUID(), date:`${incomeForm.date}T12:00:00`, source: incomeForm.source || "รายรับ", amount:Number(incomeForm.amount)} ] }));
+          setIncomeForm({ date:`${selectedMonth}-${pad2(today.getDate())}`, source:"", amount:"" });
+        };
+        const addExpense = () => {
+          if(!expenseForm.amount) return;
+          setState(s => ({ ...s, expenses:[...s.expenses, { id:crypto.randomUUID(), date:`${expenseForm.date}T12:00:00`, categoryId:expenseForm.categoryId, amount:Number(expenseForm.amount), note:expenseForm.note||""} ] }));
+          setExpenseForm({ date:`${selectedMonth}-${pad2(today.getDate())}`, categoryId: state.categories[0]?.id || "other", amount:"", note:"" });
+        };
+
+        const deleteExpense = (id) => setState(s => ({...s, expenses:s.expenses.filter(e=>e.id!==id)}));
+        const deleteIncome  = (id) => setState(s => ({...s, incomes: s.incomes.filter(e=>e.id!==id)}));
+
+        const [editingIncomeId, setEditingIncomeId] = useState(null);
+        const [editingExpenseId, setEditingExpenseId] = useState(null);
+        const [editIncomeForm, setEditIncomeForm] = useState({ date:"", source:"", amount:"" });
+        const [editExpenseForm, setEditExpenseForm] = useState({ date:"", categoryId:"other", amount:"", note:"" });
+
+        const startEditIncome = (i) => { setEditingIncomeId(i.id); setEditIncomeForm({ date:i.date.slice(0,10), source:i.source||"รายรับ", amount:String(i.amount) }); };
+        const saveEditIncome = () => { setState(s=>({...s, incomes: s.incomes.map(x=> x.id===editingIncomeId ? {...x, date:`${editIncomeForm.date}T12:00:00`, source:editIncomeForm.source, amount:Number(editIncomeForm.amount)} : x)})); setEditingIncomeId(null); };
+        const cancelEditIncome = () => setEditingIncomeId(null);
+
+        const startEditExpense = (e) => { setEditingExpenseId(e.id); setEditExpenseForm({ date:e.date.slice(0,10), categoryId:e.categoryId, amount:String(e.amount), note:e.note||"" }); };
+        const saveEditExpense = () => { setState(s=>({...s, expenses: s.expenses.map(x=> x.id===editingExpenseId ? {...x, date:`${editExpenseForm.date}T12:00:00`, categoryId:editExpenseForm.categoryId, amount:Number(editExpenseForm.amount), note:editExpenseForm.note} : x)})); setEditingExpenseId(null); };
+        const cancelEditExpense = () => setEditingExpenseId(null);
+
+        const fileInputRef = useRef(null);
+        const exportJSON = () => {
+          const blob = new Blob([JSON.stringify(state,null,2)], {type:"application/json"});
+          const url = URL.createObjectURL(blob); const a = document.createElement("a");
+          a.href = url; a.download = `smart-budget-${Date.now()}.json`; a.click(); URL.revokeObjectURL(url);
+        };
+        const importJSON = (file) => {
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            try{
+              const data = JSON.parse(e.target.result);
+              if (data && data.incomes && data.expenses && data.categories) setState(data);
+              else alert("ไฟล์ไม่ถูกต้อง");
+            } catch{ alert("ไม่สามารถอ่านไฟล์ได้"); }
+          };
+          reader.readAsText(file);
+        };
+        const resetAll = () => { if(confirm("ล้างข้อมูลทั้งหมดและเริ่มใหม่?")){ setState(seedData()); setSelectedMonth(CURRENT_MONTH_KEY); } };
+
+        return (
+          <div className={dark ? "dark" : ""}>
+            <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+              <header className="sticky top-0 z-10 backdrop-blur bg-white/70 dark:bg-slate-900/60 border-b border-slate-200/60 dark:border-slate-800">
+                <div className="max-w-6xl mx-auto px-4 py-3 flex flex-wrap items-center gap-3">
+                  <div className="w-9 h-9 rounded-2xl bg-gradient-to-tr from-indigo-500 via-sky-500 to-emerald-400" />
+                  <h1 className="text-lg sm:text-2xl font-semibold">Smart Budget — จัดการรายรับรายจ่าย</h1>
+                  <div className="ml-auto flex flex-wrap items-center gap-2">
+                    <label className="text-sm hidden sm:block">เดือน:</label>
+                    <input type="month" value={selectedMonth} onChange={e=>setSelectedMonth(e.target.value)} className="px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800"/>
+                    <label className="flex items-center gap-2 text-sm px-2 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800">
+                      <input type="checkbox" checked={includeCarry} onChange={e=>setState(s=>({...s, settings:{...(s.settings||{}), includeCarryOver: e.target.checked}}))}/>
+                      รวมยกยอดเดือนก่อน
+                    </label>
+                    <button onClick={()=>setDark(d=>!d)} className="px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800" title="สลับโหมดแสง/มืด">โหมด: {dark?"มืด":"สว่าง"}</button>
+                  </div>
+                </div>
+              </header>
+
+              <main className="max-w-6xl mx-auto px-4 py-6 space-y-6">
+                <StatusBanner status={status} willShort={willShort} projectedShort={projectedShort} carryPrev={includeCarry ? carryPrev : 0} />
+
+                <section className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <SummaryCard title="รายรับ (เดือนนี้)" value={fmtTHB(totalIncome)} sub={selectedMonth} accent="from-emerald-400 to-emerald-600" />
+                  <SummaryCard title="รายจ่าย (เดือนนี้)" value={fmtTHB(totalExpense)} sub={selectedMonth} accent="from-rose-400 to-rose-600" />
+                  <SummaryCard title={includeCarry ? "คงเหลือรวม (รวมยกยอด)" : "คงเหลือเดือนนี้"} value={fmtTHB(endingBalance)} sub={includeCarry ? `ยกยอดก่อนหน้า: ${fmtTHB(carryPrev)}` : "ไม่รวมยกยอด"} accent="from-sky-400 to-indigo-600" />
+                  <SummaryCard title="สัดส่วนใช้จ่าย" value={`${Math.round(utilization*100)}%`} sub={includeCarry ? "เทียบกับ รายรับ+ยกยอด" : "เทียบกับ รายรับเดือนนี้"} accent="from-amber-400 to-orange-600" />
+                </section>
+
+                <section className="grid lg:grid-cols-2 gap-6">
+                  <IncomePanel {...{ incomeForm, setIncomeForm, addIncome, monthIncomes, deleteIncome, editingIncomeId, startEditIncome, editIncomeForm, setEditIncomeForm, saveEditIncome, cancelEditIncome }} />
+                  <ExpensePanel {...{ expenseForm, setExpenseForm, addExpense, monthExpenses, deleteExpense, editingExpenseId, startEditExpense, editExpenseForm, setEditExpenseForm, saveEditExpense, cancelEditExpense, state, categoryMap }} />
+                </section>
+
+                <section className="grid lg:grid-cols-2 gap-6">
+                  <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 shadow-sm border border-slate-200 dark:border-slate-800 h-[360px]">
+                    <h2 className="text-lg font-semibold mb-3">สัดส่วนรายจ่ายตามหมวด (Pie)</h2>
+                    <div className="w-full h-[290px]">
+                      <ResponsiveContainer>
+                        <PieChart>
+                          <Pie dataKey="value" data={pieData} nameKey="name" innerRadius={60} outerRadius={100} paddingAngle={3}>
+                            {pieData.map((e, idx) => <Cell key={idx} fill={e.color} />)}
+                          </Pie>
+                          <Tooltip formatter={(v)=>fmtTHB(v)} />
+                          <Legend />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+
+                  <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 shadow-sm border border-slate-200 dark:border-slate-800 h-[360px]">
+                    <h2 className="text-lg font-semibold mb-3">รายรับ vs รายจ่าย (ทั้งปี {selectedYear})</h2>
+                    <div className="w-full h-[290px]">
+                      <ResponsiveContainer>
+                        <BarChart data={yearData}>
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="month" /><YAxis /><Tooltip formatter={(v)=>fmtTHB(v)} /><Legend />
+                          <Bar dataKey="income" name="รายรับ" fill="#22c55e" radius={[6,6,0,0]} />
+                          <Bar dataKey="expense" name="รายจ่าย" fill="#ef4444" radius={[6,6,0,0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+
+                  <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 shadow-sm border border-slate-200 dark:border-slate-800 h-[360px] lg:col-span-2">
+                    <h2 className="text-lg font-semibold mb-3">แนวโน้มคงเหลือรายเดือน (ปี {selectedYear})</h2>
+                    <div className="w-full h-[290px]">
+                      <ResponsiveContainer>
+                        <LineChart data={yearData}>
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="month" /><YAxis /><Tooltip formatter={(v)=>fmtTHB(v)} /><Legend />
+                          <Line type="monotone" dataKey="balance" name="คงเหลือ" stroke="#3b82f6" strokeWidth={3} dot={false} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="grid lg:grid-cols-2 gap-6">
+                  <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 shadow-sm border border-slate-200 dark:border-slate-800">
+                    <h2 className="text-lg font-semibold mb-3">จัดการหมวดหมู่</h2>
+                    <CategoryManager state={state} setState={setState} />
+                  </div>
+
+                  <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 shadow-sm border border-slate-200 dark:border-slate-800">
+                    <h2 className="text-lg font-semibold mb-3">สำรอง/กู้คืนข้อมูล</h2>
+                    <div className="flex flex-wrap gap-2">
+                      <button onClick={exportJSON} className="px-4 py-2 rounded-xl border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800">ส่งออก JSON</button>
+                      <button onClick={()=>fileInputRef.current?.click()} className="px-4 py-2 rounded-xl border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800">นำเข้า JSON</button>
+                      <input ref={fileInputRef} type="file" accept="application/json" hidden onChange={(e)=>e.target.files?.[0] && importJSON(e.target.files[0])}/>
+                      <button onClick={resetAll} className="px-4 py-2 rounded-xl text-white bg-rose-600 hover:bg-rose-700">ล้างข้อมูล</button>
+                    </div>
+                    <p className="text-sm text-slate-500 mt-2">ข้อมูลถูกเก็บไว้ภายในอุปกรณ์ของคุณ (Local Storage) — แชร์ลิงก์แอพให้ใครก็ได้ ข้อมูลจะแยกตามอุปกรณ์/เบราว์เซอร์</p>
+                  </div>
+                </section>
+
+                <footer className="text-center text-xs text-slate-500 py-6">ต้นแบบ · สกุลเงิน THB · Asia/Bangkok</footer>
+              </main>
+            </div>
+          </div>
+        );
+      }
+
+      function SummaryCard({ title, value, sub, accent }) {
+        return (
+          <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 shadow-sm border border-slate-200 dark:border-slate-800">
+            <div className={`w-full h-1.5 rounded-full bg-gradient-to-r ${accent} mb-3`} />
+            <div className="text-sm text-slate-500">{title}</div>
+            <div className="text-xl sm:text-2xl font-semibold">{value}</div>
+            <div className="text-xs text-slate-500 mt-1">{sub}</div>
+          </div>
+        );
+      }
+
+      function StatusBanner({ status, willShort, projectedShort, carryPrev = 0 }) {
+        const base = "rounded-2xl p-3 sm:p-4 border";
+        if (status === "วิกฤต") {
+          return (
+            <div className={`${base} bg-rose-50 dark:bg-rose-950/30 border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-200`}>
+              <div className="font-semibold">วิกฤต: ใช้จ่ายเกินความสามารถเดือนนี้</div>
+              {carryPrev !== 0 && <div className="text-sm">ยกยอดก่อนหน้า: {fmtTHB(carryPrev)}</div>}
+              <div className="text-sm">พิจารณาลดรายจ่ายเร่งด่วน หรือเพิ่มรายรับ</div>
+            </div>
+          );
+        }
+        if (status === "เสี่ยง") {
+          return (
+            <div className={`${base} bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-900 text-amber-700 dark:text-amber-200`}>
+              <div className="font-semibold">เตือน: ใช้จ่ายเกิน 80% ของวงเงินเดือนนี้</div>
+              {carryPrev !== 0 && <div className="text-sm">ยกยอดก่อนหน้า: {fmtTHB(carryPrev)}</div>}
+            </div>
+          );
+        }
+        return (
+          <div className={`${base} bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-200`}>
+            <div className="font-semibold">สถานะปกติ</div>
+            {carryPrev !== 0 && <div className="text-sm">ยกยอดก่อนหน้า: {fmtTHB(carryPrev)}</div>}
+            {willShort && <div className="mt-1 text-sm text-rose-600 dark:text-rose-300">คาดว่าเงินจะไม่พอสิ้นเดือน ประมาณ {fmtTHB(Math.abs(projectedShort))}</div>}
+          </div>
+        );
+      }
+
+      function CategoryManager({ state, setState }) {
+        const [newCatName, setNewCatName] = useState("");
+        const [newCatColor, setNewCatColor] = useState("#64748b");
+        const addCategory = () => {
+          if(!newCatName.trim()) return;
+          const idBase = newCatName.trim().toLowerCase().split(" ").filter(Boolean).join("-");
+          const id = `${idBase}-${Math.floor(Math.random()*1000)}`;
+          setState(s => ({...s, categories:[...s.categories, {id, name:newCatName.trim(), color:newCatColor}]}));
+          setNewCatName(""); setNewCatColor("#64748b");
+        };
+        return (
+          <div>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <input type="text" placeholder="ชื่อหมวด เช่น ของใช้ส่วนตัว" value={newCatName} onChange={e=>setNewCatName(e.target.value)} className="flex-1 px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800"/>
+              <input type="color" value={newCatColor} onChange={e=>setNewCatColor(e.target.value)} className="h-10 w-20 rounded-xl border border-slate-300 dark:border-slate-700"/>
+              <button onClick={addCategory} className="px-4 py-2 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900">เพิ่มหมวด</button>
+            </div>
+            <ul className="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {state.categories.map(c => (
+                <li key={c.id} className="flex items-center gap-2 bg-slate-50 dark:bg-slate-800/60 rounded-xl px-3 py-2">
+                  <span className="inline-block w-3 h-3 rounded-full" style={{background:c.color}}></span>
+                  <span className="text-sm">{c.name}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        );
+      }
+
+      function IncomePanel({ incomeForm, setIncomeForm, addIncome, monthIncomes, deleteIncome, editingIncomeId, startEditIncome, editIncomeForm, setEditIncomeForm, saveEditIncome, cancelEditIncome }){
+        return (
+          <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 shadow-sm border border-slate-200 dark:border-slate-800">
+            <h2 className="text-lg font-semibold mb-3">เพิ่มรายรับ</h2>
+            <div className="grid sm:grid-cols-3 gap-3">
+              <div><label className="text-sm">วันที่</label><input type="date" value={incomeForm.date} onChange={e=>setIncomeForm({...incomeForm, date:e.target.value})} className="mt-1 w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800"/></div>
+              <div><label className="text-sm">แหล่งที่มา</label><input type="text" placeholder="เงินเดือน / อื่น ๆ" value={incomeForm.source} onChange={e=>setIncomeForm({...incomeForm, source:e.target.value})} className="mt-1 w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800"/></div>
+              <div><label className="text-sm">จำนวนเงิน (฿)</label><input type="number" inputMode="decimal" step="0.01" value={incomeForm.amount} onChange={e=>setIncomeForm({...incomeForm, amount:e.target.value})} className="mt-1 w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800"/></div>
+            </div>
+            <div className="mt-3 flex gap-2">
+              <button onClick={addIncome} className="px-4 py-2 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700">บันทึกรายรับ</button>
+              <button onClick={()=>setIncomeForm({date:incomeForm.date, source:"", amount:""})} className="px-4 py-2 rounded-xl border border-slate-300 dark:border-slate-700">ล้างค่า</button>
+            </div>
+            <div className="mt-4">
+              <h3 className="font-medium mb-2">รายการรายรับเดือนนี้</h3>
+              <div className="space-y-2">
+                {monthIncomes.length===0 && <p className="text-sm text-slate-500">ยังไม่มีรายการ</p>}
+                {monthIncomes.map(i => (
+                  <div key={i.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-slate-50 dark:bg-slate-800/60 rounded-xl px-3 py-2">
+                    {editingIncomeId===i.id ? (
+                      <div className="grid sm:grid-cols-3 gap-2 w-full">
+                        <input type="date" value={editIncomeForm.date} onChange={e=>setEditIncomeForm({...editIncomeForm, date:e.target.value})} className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"/>
+                        <input type="text" value={editIncomeForm.source} onChange={e=>setEditIncomeForm({...editIncomeForm, source:e.target.value})} className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"/>
+                        <input type="number" inputMode="decimal" step="0.01" value={editIncomeForm.amount} onChange={e=>setEditIncomeForm({...editIncomeForm, amount:e.target.value})} className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"/>
+                        <div className="sm:col-span-3 flex gap-2">
+                          <button onClick={saveEditIncome} className="px-3 py-1 rounded-lg bg-emerald-600 text-white">บันทึก</button>
+                          <button onClick={cancelEditIncome} className="px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-700">ยกเลิก</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="text-sm">
+                          <div className="font-medium">{i.source || "รายรับ"}</div>
+                          <div className="text-slate-500">{new Date(i.date).toLocaleDateString("th-TH")} · {fmtTHB(i.amount)}</div>
+                        </div>
+                        <div className="flex gap-3">
+                          <button onClick={()=>startEditIncome(i)} className="text-sky-600 hover:underline text-sm">แก้ไข</button>
+                          <button onClick={()=>deleteIncome(i.id)} className="text-rose-600 hover:underline text-sm">ลบ</button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      function ExpensePanel({ expenseForm, setExpenseForm, addExpense, monthExpenses, deleteExpense, editingExpenseId, startEditExpense, editExpenseForm, setEditExpenseForm, saveEditExpense, cancelEditExpense, state, categoryMap }){
+        return (
+          <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 shadow-sm border border-slate-200 dark:border-slate-800">
+            <h2 className="text-lg font-semibold mb-3">เพิ่มรายจ่าย</h2>
+            <div className="grid sm:grid-cols-4 gap-3">
+              <div><label className="text-sm">วันที่</label><input type="date" value={expenseForm.date} onChange={e=>setExpenseForm({...expenseForm, date:e.target.value})} className="mt-1 w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800"/></div>
+              <div><label className="text-sm">หมวดหมู่</label><select value={expenseForm.categoryId} onChange={e=>setExpenseForm({...expenseForm, categoryId:e.target.value})} className="mt-1 w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800">{state.categories.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+              <div><label className="text-sm">จำนวนเงิน (฿)</label><input type="number" inputMode="decimal" step="0.01" value={expenseForm.amount} onChange={e=>setExpenseForm({...expenseForm, amount:e.target.value})} className="mt-1 w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800"/></div>
+              <div><label className="text-sm">บันทึกย่อ</label><input type="text" value={expenseForm.note} onChange={e=>setExpenseForm({...expenseForm, note:e.target.value})} placeholder="เช่น ค่าอาหารกลางวัน" className="mt-1 w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800"/></div>
+            </div>
+            <div className="mt-3 flex gap-2">
+              <button onClick={addExpense} className="px-4 py-2 rounded-xl bg-rose-600 text-white hover:bg-rose-700">บันทึกรายจ่าย</button>
+              <button onClick={()=>setExpenseForm({ date: expenseForm.date, categoryId: state.categories[0]?.id || "other", amount:"", note:"" })} className="px-4 py-2 rounded-xl border border-slate-300 dark:border-slate-700">ล้างค่า</button>
+            </div>
+
+            <div className="mt-4">
+              <h3 className="font-medium mb-2">รายการรายจ่ายเดือนนี้</h3>
+              <div className="space-y-2">
+                {monthExpenses.length===0 && <p className="text-sm text-slate-500">ยังไม่มีรายการ</p>}
+                {monthExpenses.map(e => (
+                  <div key={e.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-slate-50 dark:bg-slate-800/60 rounded-xl px-3 py-2">
+                    {editingExpenseId===e.id ? (
+                      <div className="grid sm:grid-cols-4 gap-2 w-full">
+                        <input type="date" value={editExpenseForm.date} onChange={e2=>setEditExpenseForm({...editExpenseForm, date:e2.target.value})} className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"/>
+                        <select value={editExpenseForm.categoryId} onChange={e2=>setEditExpenseForm({...editExpenseForm, categoryId:e2.target.value})} className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900">{state.categories.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select>
+                        <input type="number" inputMode="decimal" step="0.01" value={editExpenseForm.amount} onChange={e2=>setEditExpenseForm({...editExpenseForm, amount:e2.target.value})} className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"/>
+                        <input type="text" value={editExpenseForm.note} onChange={e2=>setEditExpenseForm({...editExpenseForm, note:e2.target.value})} className="px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"/>
+                        <div className="sm:col-span-4 flex gap-2">
+                          <button onClick={saveEditExpense} className="px-3 py-1 rounded-lg bg-emerald-600 text-white">บันทึก</button>
+                          <button onClick={cancelEditExpense} className="px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-700">ยกเลิก</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="text-sm">
+                          <div className="font-medium">{(state.categories.find(c=>c.id===e.categoryId)?.name)||e.categoryId} · {fmtTHB(e.amount)}</div>
+                          <div className="text-slate-500">{new Date(e.date).toLocaleDateString("th-TH")} · {e.note || "—"}</div>
+                        </div>
+                        <div className="flex gap-3">
+                          <button onClick={()=>startEditExpense(e)} className="text-sky-600 hover:underline text-sm">แก้ไข</button>
+                          <button onClick={()=>deleteExpense(e.id)} className="text-rose-600 hover:underline text-sm">ลบ</button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      // Mount
+      ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+    </script>
+  </body>
+</html>
